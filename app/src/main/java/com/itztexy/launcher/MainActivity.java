@@ -41,9 +41,13 @@ import android.widget.FrameLayout;
 import android.widget.GridView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.SeekBar;
 import android.widget.TextClock;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import androidx.viewpager.widget.PagerAdapter;
+import androidx.viewpager.widget.ViewPager;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -61,6 +65,8 @@ public class MainActivity extends Activity {
 
     static final int REQ_PICK = 42;
     static final int DOCK_MAX = 5;
+    static final int ICON_MIN_DP = 28;
+    static final int ICON_MAX_DP = 76;
 
     static class AppInfo {
         String key, pkg, label;
@@ -80,13 +86,15 @@ public class MainActivity extends Activity {
     final Map<String, AppInfo> appMap = new HashMap<>();
 
     FrameLayout root, home, drawer;
-    LinearLayout dock;
+    LinearLayout dock, dots;
+    ViewPager pager;
+    HomePagerAdapter pagerAdapter;
     GridView grid;
     EditText search;
     EntryAdapter drawerAdapter, folderAdapter;
     AlertDialog folderDialog;
     String openFolderId;
-    int cols;
+    int cols, homeCols, iconDp;
 
     // ------------------------------------------------------------ lifecycle
 
@@ -96,6 +104,8 @@ public class MainActivity extends Activity {
         store = new Store(this);
         pm = getPackageManager();
         cols = store.sp.getInt("cols", 4);
+        homeCols = store.sp.getInt("homeCols", 4);
+        iconDp = store.sp.getInt("iconDp", 44);
         loadApps();
         initDock();
         buildUi();
@@ -108,7 +118,8 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         // Home button pressed while we are already the launcher
         if (folderDialog != null) folderDialog.dismiss();
-        closeDrawer();
+        if (drawer.getVisibility() == View.VISIBLE) closeDrawer();
+        else pager.setCurrentItem(0, true);
     }
 
     @Override
@@ -205,6 +216,10 @@ public class MainActivity extends Activity {
         return cs != null ? cs.newDrawable(getResources()).mutate() : d;
     }
 
+    String homeKey(Entry e) {
+        return e.folder ? "folder:" + e.key : e.key;
+    }
+
     Entry appEntry(AppInfo a) {
         Entry e = new Entry();
         e.key = a.key;
@@ -282,6 +297,22 @@ public class MainActivity extends Activity {
         return out;
     }
 
+    /** Items on a home page, in the order the user arranged them (not sorted). */
+    List<Entry> pageEntries(int page) {
+        List<Entry> out = new ArrayList<>();
+        if (page < 0 || page >= store.pages.size()) return out;
+        for (String k : store.pages.get(page)) {
+            if (k.startsWith("folder:")) {
+                Store.Folder f = store.folder(k.substring(7));
+                if (f != null) out.add(folderEntry(f));
+            } else {
+                AppInfo a = appMap.get(k);
+                if (a != null) out.add(appEntry(a));
+            }
+        }
+        return out;
+    }
+
     void sortEntries(List<Entry> list) {
         Collections.sort(list, (a, b) -> {
             if (a.folder != b.folder) return a.folder ? -1 : 1;
@@ -291,6 +322,8 @@ public class MainActivity extends Activity {
 
     void refreshAll() {
         if (drawerAdapter != null) drawerAdapter.reload();
+        if (pagerAdapter != null) pagerAdapter.notifyDataSetChanged();
+        refreshDots();
         refreshDock();
         if (folderAdapter != null && folderDialog != null && folderDialog.isShowing()) folderAdapter.reload();
     }
@@ -299,6 +332,10 @@ public class MainActivity extends Activity {
 
     int dp(int v) {
         return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    float labelSp() {
+        return iconDp >= 48 ? 12f : (iconDp >= 38 ? 11f : 10f);
     }
 
     void style(TextView t, float sp) {
@@ -315,31 +352,31 @@ public class MainActivity extends Activity {
         home = new FrameLayout(this);
         root.addView(home, match);
 
-        // clock + date
-        LinearLayout clock = new LinearLayout(this);
-        clock.setOrientation(LinearLayout.VERTICAL);
-        clock.setGravity(Gravity.CENTER_HORIZONTAL);
-        TextClock time = new TextClock(this);
-        time.setFormat12Hour("h:mm");
-        time.setFormat24Hour("HH:mm");
-        style(time, 64);
-        TextClock date = new TextClock(this);
-        date.setFormat12Hour("EEEE, MMMM d");
-        date.setFormat24Hour("EEEE, MMMM d");
-        style(date, 16);
-        clock.addView(time);
-        clock.addView(date);
-        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP);
-        clp.topMargin = dp(72);
-        home.addView(clock, clp);
+        // swipeable home pages
+        pager = new ViewPager(this);
+        pagerAdapter = new HomePagerAdapter();
+        pager.setAdapter(pagerAdapter);
+        pager.addOnPageChangeListener(new ViewPager.SimpleOnPageChangeListener() {
+            @Override
+            public void onPageSelected(int position) {
+                refreshDots();
+            }
+        });
+        home.addView(pager, match);
 
-        // swipe-up handle + dock
+        // page dots + swipe-up handle + dock
         LinearLayout bottom = new LinearLayout(this);
         bottom.setOrientation(LinearLayout.VERTICAL);
         bottom.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        dots = new LinearLayout(this);
+        dots.setOrientation(LinearLayout.HORIZONTAL);
+        dots.setGravity(Gravity.CENTER_VERTICAL);
+        bottom.addView(dots, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         FrameLayout hbox = new FrameLayout(this);
-        hbox.setPadding(dp(40), dp(14), dp(40), dp(14));
+        hbox.setPadding(dp(40), dp(8), dp(40), dp(10));
         View handle = new View(this);
         GradientDrawable hd = new GradientDrawable();
         hd.setColor(0xAAFFFFFF);
@@ -348,6 +385,7 @@ public class MainActivity extends Activity {
         hbox.addView(handle, new FrameLayout.LayoutParams(dp(48), dp(5)));
         hbox.setOnClickListener(v -> openDrawer());
         bottom.addView(hbox);
+
         dock = new LinearLayout(this);
         dock.setOrientation(LinearLayout.HORIZONTAL);
         dock.setGravity(Gravity.CENTER);
@@ -357,28 +395,6 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
         home.addView(bottom, blp);
-
-        GestureDetector gd = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
-            @Override
-            public boolean onDown(MotionEvent e) {
-                return true;
-            }
-
-            @Override
-            public boolean onFling(MotionEvent a, MotionEvent b, float vx, float vy) {
-                if (a != null && b != null && a.getY() - b.getY() > dp(80) && vy < -600) {
-                    openDrawer();
-                    return true;
-                }
-                return false;
-            }
-
-            @Override
-            public void onLongPress(MotionEvent e) {
-                homeMenu();
-            }
-        });
-        home.setOnTouchListener((v, ev) -> gd.onTouchEvent(ev));
 
         // app drawer overlay
         drawer = new FrameLayout(this);
@@ -457,25 +473,194 @@ public class MainActivity extends Activity {
         setContentView(root);
     }
 
+    // ---- home pages ----
+
+    class HomePagerAdapter extends PagerAdapter {
+        @Override
+        public int getCount() {
+            return store.pages.size();
+        }
+
+        @Override
+        public boolean isViewFromObject(View view, Object object) {
+            return view == object;
+        }
+
+        @Override
+        public Object instantiateItem(ViewGroup container, int position) {
+            View page = buildPage(position);
+            container.addView(page);
+            return page;
+        }
+
+        @Override
+        public void destroyItem(ViewGroup container, int position, Object object) {
+            container.removeView((View) object);
+        }
+
+        @Override
+        public int getItemPosition(Object object) {
+            return POSITION_NONE; // rebuild pages whenever data changes
+        }
+    }
+
+    View buildPage(int pos) {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(8), dp(16), dp(8), dp(140));
+        if (pos == 0) page.addView(makeClock());
+
+        GridView g = new GridView(this);
+        g.setNumColumns(homeCols);
+        g.setVerticalSpacing(dp(10));
+        g.setSelector(new ColorDrawable(Color.TRANSPARENT));
+        g.setVerticalScrollBarEnabled(false);
+        EntryAdapter ad = new EntryAdapter(() -> pageEntries(pos), true);
+        g.setAdapter(ad);
+        ad.reload();
+        g.setOnItemClickListener((p, v, i, id) -> onEntryClick(ad.items.get(i)));
+        g.setOnItemLongClickListener((p, v, i, id) -> {
+            showMenu(ad.items.get(i));
+            return true;
+        });
+
+        TextView hint = new TextView(this);
+        hint.setText("Empty page\nLong-press here and choose \"Add apps to this page\"");
+        hint.setGravity(Gravity.CENTER);
+        hint.setTextColor(0xAAFFFFFF);
+        hint.setTextSize(13);
+        hint.setPadding(dp(16), dp(32), dp(16), dp(32));
+        FrameLayout fl = new FrameLayout(this);
+        fl.addView(g);
+        fl.addView(hint);
+        g.setEmptyView(hint);
+        page.addView(fl, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        attachGestures(g, g);
+        attachGestures(page, null);
+        return page;
+    }
+
+    View makeClock() {
+        LinearLayout clock = new LinearLayout(this);
+        clock.setOrientation(LinearLayout.VERTICAL);
+        clock.setGravity(Gravity.CENTER_HORIZONTAL);
+        clock.setPadding(0, dp(32), 0, dp(24));
+        TextClock time = new TextClock(this);
+        time.setFormat12Hour("h:mm");
+        time.setFormat24Hour("HH:mm");
+        style(time, 56);
+        TextClock date = new TextClock(this);
+        date.setFormat12Hour("EEEE, MMMM d");
+        date.setFormat24Hour("EEEE, MMMM d");
+        style(date, 15);
+        clock.addView(time);
+        clock.addView(date);
+        return clock;
+    }
+
+    /** Swipe up = open drawer. Long-press on empty space = home settings. */
+    void attachGestures(View target, GridView g) {
+        GestureDetector gd = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override
+            public boolean onDown(MotionEvent e) {
+                return true;
+            }
+
+            @Override
+            public boolean onFling(MotionEvent a, MotionEvent b, float vx, float vy) {
+                if (a != null && b != null && a.getY() - b.getY() > dp(80)
+                        && vy < -600 && Math.abs(vy) > Math.abs(vx)) {
+                    openDrawer();
+                    return true;
+                }
+                return false;
+            }
+
+            @Override
+            public void onLongPress(MotionEvent e) {
+                if (g != null && g.pointToPosition((int) e.getX(), (int) e.getY())
+                        != GridView.INVALID_POSITION) return;
+                homeMenu();
+            }
+        });
+        target.setOnTouchListener((v, ev) -> {
+            gd.onTouchEvent(ev);
+            return g == null;
+        });
+    }
+
+    void refreshDots() {
+        if (dots == null || pager == null) return;
+        dots.removeAllViews();
+        int cur = pager.getCurrentItem();
+        for (int i = 0; i < store.pages.size(); i++) {
+            View d = new View(this);
+            GradientDrawable gd = new GradientDrawable();
+            gd.setShape(GradientDrawable.OVAL);
+            gd.setColor(Color.WHITE);
+            d.setBackground(gd);
+            d.setAlpha(i == cur ? 1f : 0.4f);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(7), dp(7));
+            lp.setMargins(dp(4), dp(6), dp(4), dp(6));
+            dots.addView(d, lp);
+        }
+        TextView plus = new TextView(this);
+        plus.setText("+");
+        style(plus, 18);
+        plus.setPadding(dp(12), dp(2), dp(8), dp(2));
+        plus.setOnClickListener(v -> addPage());
+        dots.addView(plus);
+    }
+
+    void addPage() {
+        store.addPage();
+        pagerAdapter.notifyDataSetChanged();
+        pager.setCurrentItem(store.pages.size() - 1, true);
+        refreshDots();
+    }
+
+    void deleteCurrentPage() {
+        if (store.pages.size() <= 1) {
+            Toast.makeText(this, "You need at least one page", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        int cur = pager.getCurrentItem();
+        new AlertDialog.Builder(this)
+                .setTitle("Delete page " + (cur + 1) + "?")
+                .setMessage("Apps on it stay in the app drawer.")
+                .setPositiveButton("Delete", (d, w) -> {
+                    store.deletePage(cur);
+                    pagerAdapter.notifyDataSetChanged();
+                    pager.setCurrentItem(Math.min(cur, store.pages.size() - 1), false);
+                    refreshDots();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    // ---- cells / adapters ----
+
     View makeCell(Entry e, boolean showLabel) {
         LinearLayout l = new LinearLayout(this);
         l.setOrientation(LinearLayout.VERTICAL);
         l.setGravity(Gravity.CENTER_HORIZONTAL);
-        l.setPadding(dp(4), dp(8), dp(4), dp(8));
+        l.setPadding(dp(2), dp(6), dp(2), dp(6));
         ImageView iv = new ImageView(this);
         iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
         iv.setImageDrawable(copy(e.icon));
-        l.addView(iv, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        l.addView(iv, new LinearLayout.LayoutParams(dp(iconDp), dp(iconDp)));
         if (showLabel) {
             TextView tv = new TextView(this);
             tv.setText(e.label);
             tv.setMaxLines(1);
             tv.setEllipsize(TextUtils.TruncateAt.END);
             tv.setGravity(Gravity.CENTER);
-            style(tv, 12);
+            style(tv, labelSp());
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.topMargin = dp(4);
+            lp.topMargin = dp(3);
             l.addView(tv, lp);
         }
         return l;
@@ -628,14 +813,23 @@ public class MainActivity extends Activity {
     }
 
     void showMenu(Entry e) {
+        String hk = homeKey(e);
+        int pg = store.pageOf(hk);
         List<String> opts = new ArrayList<>();
         opts.add("Rename");
         opts.add("Change icon");
+        opts.add(e.folder ? "Reset icon" : "Reset name & icon");
+        if (pg < 0) {
+            opts.add("Add to home screen");
+        } else {
+            opts.add("Remove from home screen");
+            opts.add("Move left");
+            opts.add("Move right");
+            if (store.pages.size() > 1) opts.add("Move to page…");
+        }
         if (e.folder) {
-            opts.add("Reset icon");
             opts.add("Delete folder");
         } else {
-            opts.add("Reset name & icon");
             opts.add("Add to folder");
             if (store.folderOf(e.key) != null) opts.add("Remove from folder");
             opts.add(store.dock.contains(e.key) ? "Remove from dock" : "Add to dock");
@@ -650,6 +844,7 @@ public class MainActivity extends Activity {
 
     void handle(Entry e, String action) {
         String iconKey = e.folder ? "folder:" + e.key : e.key;
+        String hk = homeKey(e);
         AppInfo a = e.folder ? null : appMap.get(e.key);
         switch (action) {
             case "Rename":
@@ -666,17 +861,25 @@ public class MainActivity extends Activity {
                     refreshAll();
                 });
                 break;
-            case "Change icon":
+            case "Change icon": {
+                boolean custom = store.icons.containsKey(iconKey);
+                List<String> o = new ArrayList<>();
+                o.add("Choose image from gallery");
+                if (custom) o.add("Change shape (now: " + store.shapeOf(iconKey) + ")");
+                o.add("Restore default");
                 new AlertDialog.Builder(this)
                         .setTitle("Change icon")
-                        .setItems(new String[]{"Choose image from gallery", "Restore default"}, (d, w) -> {
-                            if (w == 0) pickImage(iconKey);
+                        .setItems(o.toArray(new String[0]), (d, w) -> {
+                            String pick = o.get(w);
+                            if (pick.startsWith("Choose")) pickImage(iconKey);
+                            else if (pick.startsWith("Change shape")) askShape(iconKey);
                             else {
                                 store.resetIcon(iconKey);
                                 refreshAll();
                             }
                         }).show();
                 break;
+            }
             case "Reset icon":
                 store.resetIcon(iconKey);
                 refreshAll();
@@ -684,7 +887,32 @@ public class MainActivity extends Activity {
             case "Reset name & icon":
                 store.labels.remove(e.key);
                 store.resetIcon(iconKey);
+                store.save();
                 refreshAll();
+                break;
+            case "Add to home screen": {
+                int cur = pager.getCurrentItem();
+                store.addToPage(cur, hk);
+                if (folderDialog != null) folderDialog.dismiss();
+                closeDrawer();
+                refreshAll();
+                Toast.makeText(this, "Added to page " + (cur + 1), Toast.LENGTH_SHORT).show();
+                break;
+            }
+            case "Remove from home screen":
+                store.removeFromHome(hk);
+                refreshAll();
+                break;
+            case "Move left":
+                store.shift(hk, -1);
+                refreshAll();
+                break;
+            case "Move right":
+                store.shift(hk, 1);
+                refreshAll();
+                break;
+            case "Move to page…":
+                chooseTargetPage(hk);
                 break;
             case "Delete folder":
                 store.deleteFolder(e.key);
@@ -728,6 +956,25 @@ public class MainActivity extends Activity {
         }
     }
 
+    void chooseTargetPage(String hk) {
+        int from = store.pageOf(hk);
+        List<String> names = new ArrayList<>();
+        List<Integer> targets = new ArrayList<>();
+        for (int i = 0; i < store.pages.size(); i++) {
+            if (i == from) continue;
+            names.add("Page " + (i + 1));
+            targets.add(i);
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Move to page")
+                .setItems(names.toArray(new String[0]), (d, w) -> {
+                    int target = targets.get(w);
+                    store.addToPage(target, hk);
+                    refreshAll();
+                    pager.setCurrentItem(target, true);
+                }).show();
+    }
+
     void chooseFolder(String appKey) {
         List<String> names = new ArrayList<>();
         for (Store.Folder f : store.folders) names.add(f.name);
@@ -749,26 +996,147 @@ public class MainActivity extends Activity {
                 }).show();
     }
 
+    // ------------------------------------------------------------ settings
+
     void homeMenu() {
+        String[] opts = {"Add apps to this page", "Add page", "Delete this page", "Icon size", "Home grid columns",
+                "Drawer columns", "Change wallpaper"};
         new AlertDialog.Builder(this)
-                .setItems(new String[]{"Change wallpaper", "Drawer columns"}, (d, w) -> {
-                    if (w == 0) {
-                        try {
-                            startActivity(Intent.createChooser(
-                                    new Intent(Intent.ACTION_SET_WALLPAPER), "Select wallpaper"));
-                        } catch (Exception ex) {
-                            Toast.makeText(this, "No wallpaper picker found", Toast.LENGTH_SHORT).show();
-                        }
-                    } else {
-                        new AlertDialog.Builder(this)
-                                .setTitle("Drawer columns")
-                                .setItems(new String[]{"3", "4", "5"}, (d2, w2) -> {
-                                    cols = w2 + 3;
-                                    store.sp.edit().putInt("cols", cols).apply();
-                                    grid.setNumColumns(cols);
-                                }).show();
+                .setTitle("Home settings")
+                .setItems(opts, (d, w) -> {
+                    switch (opts[w]) {
+                        case "Add apps to this page":
+                            addAppsDialog();
+                            break;
+                        case "Add page":
+                            addPage();
+                            break;
+                        case "Delete this page":
+                            deleteCurrentPage();
+                            break;
+                        case "Icon size":
+                            iconSizeDialog();
+                            break;
+                        case "Home grid columns":
+                            columnsDialog("Home grid columns", true);
+                            break;
+                        case "Drawer columns":
+                            columnsDialog("Drawer columns", false);
+                            break;
+                        case "Change wallpaper":
+                            try {
+                                startActivity(Intent.createChooser(
+                                        new Intent(Intent.ACTION_SET_WALLPAPER), "Select wallpaper"));
+                            } catch (Exception ex) {
+                                Toast.makeText(this, "No wallpaper picker found", Toast.LENGTH_SHORT).show();
+                            }
+                            break;
+                        default:
+                            break;
                     }
                 }).show();
+    }
+
+    /** Tick the apps / folders you want on the current home page. */
+    void addAppsDialog() {
+        int cur = pager.getCurrentItem();
+        List<Store.Folder> fs = new ArrayList<>(store.folders);
+        Collections.sort(fs, (x, y) -> x.name.compareToIgnoreCase(y.name));
+        List<AppInfo> as = new ArrayList<>(apps);
+        Collections.sort(as, (x, y) -> labelOf(x).compareToIgnoreCase(labelOf(y)));
+
+        List<String> keys = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+        for (Store.Folder f : fs) {
+            keys.add("folder:" + f.id);
+            names.add("[Folder] " + f.name);
+        }
+        for (AppInfo a : as) {
+            keys.add(a.key);
+            names.add(labelOf(a));
+        }
+        boolean[] checked = new boolean[keys.size()];
+        boolean[] initial = new boolean[keys.size()];
+        for (int i = 0; i < keys.size(); i++) {
+            int pg = store.pageOf(keys.get(i));
+            initial[i] = pg == cur;
+            checked[i] = pg == cur;
+            if (pg >= 0 && pg != cur) names.set(i, names.get(i) + "  (page " + (pg + 1) + ")");
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Apps on page " + (cur + 1))
+                .setMultiChoiceItems(names.toArray(new String[0]), checked, (d, w, isChecked) -> checked[w] = isChecked)
+                .setPositiveButton("Done", (d, w) -> {
+                    for (int i = 0; i < keys.size(); i++) {
+                        if (checked[i] && !initial[i]) store.addToPage(cur, keys.get(i));
+                        else if (!checked[i] && initial[i]) store.pages.get(cur).remove(keys.get(i));
+                    }
+                    store.save();
+                    refreshAll();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    void columnsDialog(String title, boolean forHome) {
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setItems(new String[]{"3", "4", "5", "6"}, (d, w) -> {
+                    int n = w + 3;
+                    if (forHome) {
+                        homeCols = n;
+                        store.sp.edit().putInt("homeCols", n).apply();
+                        pagerAdapter.notifyDataSetChanged();
+                    } else {
+                        cols = n;
+                        store.sp.edit().putInt("cols", n).apply();
+                        grid.setNumColumns(n);
+                    }
+                }).show();
+    }
+
+    void iconSizeDialog() {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setPadding(dp(24), dp(16), dp(24), dp(8));
+        TextView value = new TextView(this);
+        value.setText(iconDp + " dp");
+        value.setTextSize(16);
+        value.setGravity(Gravity.CENTER);
+        SeekBar sb = new SeekBar(this);
+        sb.setMax(ICON_MAX_DP - ICON_MIN_DP);
+        sb.setProgress(iconDp - ICON_MIN_DP);
+        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                value.setText((p + ICON_MIN_DP) + " dp");
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+            }
+        });
+        l.addView(value);
+        l.addView(sb);
+        new AlertDialog.Builder(this)
+                .setTitle("Icon size")
+                .setView(l)
+                .setPositiveButton("Apply", (d, w) -> {
+                    iconDp = sb.getProgress() + ICON_MIN_DP;
+                    store.sp.edit().putInt("iconDp", iconDp).apply();
+                    refreshAll();
+                })
+                .setNeutralButton("Default", (d, w) -> {
+                    iconDp = 44;
+                    store.sp.edit().putInt("iconDp", iconDp).apply();
+                    refreshAll();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     void prompt(String title, String initial, Consumer<String> cb) {
@@ -789,6 +1157,16 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------ icon picking
 
+    void askShape(String key) {
+        new AlertDialog.Builder(this)
+                .setTitle("Icon shape")
+                .setItems(new String[]{"Circle", "Square"}, (d, w) -> {
+                    store.setShape(key, w == 0 ? "circle" : "square");
+                    refreshAll();
+                })
+                .show();
+    }
+
     void pickImage(String key) {
         store.sp.edit().putString("pending", key).apply();
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -806,7 +1184,9 @@ public class MainActivity extends Activity {
         try {
             Bitmap bmp = loadSquare(data.getData(), 192);
             store.setIcon(key, bmp);
+            store.setShape(key, "circle"); // default; the dialog below lets you switch
             refreshAll();
+            askShape(key);
         } catch (IOException ex) {
             Toast.makeText(this, "Couldn't load that image", Toast.LENGTH_SHORT).show();
         }
