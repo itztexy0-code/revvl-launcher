@@ -7,6 +7,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
@@ -947,12 +948,30 @@ public class MainActivity extends Activity {
                 }
                 break;
             case "Uninstall":
-                if (a != null) {
-                    startActivity(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + a.pkg)));
-                }
+                if (a != null) uninstall(a);
                 break;
             default:
                 break;
+        }
+    }
+
+    void uninstall(AppInfo a) {
+        try {
+            ApplicationInfo ai = pm.getApplicationInfo(a.pkg, 0);
+            boolean system = (ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0
+                    && (ai.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0;
+            if (system) {
+                Toast.makeText(this, labelOf(a) + " is a system app and can't be uninstalled. "
+                        + "Try App info to disable it.", Toast.LENGTH_LONG).show();
+                return;
+            }
+            startActivity(new Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:" + a.pkg)));
+        } catch (Exception ex) {
+            try {
+                startActivity(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + a.pkg)));
+            } catch (Exception ex2) {
+                Toast.makeText(this, "Couldn't start the uninstall", Toast.LENGTH_SHORT).show();
+            }
         }
     }
 
